@@ -75,25 +75,16 @@ jobs:
       - uses: ./.github/actions/cache-ui-dependencies
         if: steps.restore-ui-build.outputs.cache-hit != 'true'
 
-      # Cache compiled Go binaries - skip build entirely if source unchanged
-      # Note: Version info is baked in at build time, so cached binaries will have stale version
-      # This is acceptable for the all-in-one experimental job since we're optimizing for speed
-      - name: Restore cached Go binaries
-        uses: actions/cache/restore@v4
-        id: restore-go-binaries
-        with:
-          key: go-binaries-${{ env.GOARCH }}-${{ hashFiles('**/*.go', 'go.mod', 'go.sum') }}
-          path: bin/linux_${{ env.GOARCH }}
-
       - name: Setup Go
         uses: actions/setup-go@v6
-        if: steps.restore-go-binaries.outputs.cache-hit != 'true'
         with:
           go-version-file: 'go.mod'
           cache: false
 
+      # Restore GOCACHE + GOMODCACHE from master. This provides compiled object
+      # files for all packages, so go build only recompiles changed packages and
+      # relinks. No separate binary cache needed — Go's incremental build handles it.
       - name: Cache Go dependencies
-        if: steps.restore-go-binaries.outputs.cache-hit != 'true'
         uses: ./.github/actions/cache-go-dependencies
 
       - name: Login to ghcr.io for docker layer caching
@@ -118,13 +109,13 @@ jobs:
       - name: Build Go and UI (parallel)
         env:
           CI: "true"
-          GO_CACHE_HIT: ${{ steps.restore-go-binaries.outputs.cache-hit }}
           UI_CACHE_HIT: ${{ steps.restore-ui-build.outputs.cache-hit }}
         run: |
           total_start=$SECONDS
           echo "=== Cache status ==="
-          echo "Go binaries cache: ${GO_CACHE_HIT:-miss}"
           echo "UI build cache: ${UI_CACHE_HIT:-miss}"
+          echo "GOCACHE: $(go env GOCACHE)"
+          echo "GOCACHE size: $(du -sh "$(go env GOCACHE)" 2>/dev/null | cut -f1)"
           echo ""
 
           # Time generate-version.sh separately
@@ -136,34 +127,34 @@ jobs:
           cat pkg/version/internal/version_data_generated.go
           echo ""
 
-          # Start Go build in background if not cached
+          # Always build Go — GOCACHE provides incremental compilation.
+          # Only changed packages recompile; unchanged ones come from GOCACHE.
           go_start=$SECONDS
-          if [[ "$GO_CACHE_HIT" != "true" ]]; then
-            echo "--- Starting Go build (background, -v to show recompiled packages) ---"
-            (
-              # Use -v via GOFLAGS so go-build.sh passes it through
-              GOFLAGS="${GOFLAGS:-} -v" ./scripts/go-build.sh \
-                central \
-                compliance/cmd/compliance \
-                config-controller \
-                migrator \
-                sensor/admission-control \
-                sensor/kubernetes \
-                sensor/upgrader \
-                roxctl \
-                compliance/virtualmachines/roxagent 2>/tmp/go-build-packages.txt
-              echo "Packages compiled: $(wc -l < /tmp/go-build-packages.txt)"
-              if [[ -s /tmp/go-build-packages.txt ]]; then
-                echo "First 20 recompiled packages:"
-                head -20 /tmp/go-build-packages.txt
+          echo "--- Starting Go build (background, -v to show recompiled packages) ---"
+          (
+            GOFLAGS="${GOFLAGS:-} -v" ./scripts/go-build.sh \
+              central \
+              compliance/cmd/compliance \
+              config-controller \
+              migrator \
+              sensor/admission-control \
+              sensor/kubernetes \
+              sensor/upgrader \
+              roxctl \
+              compliance/virtualmachines/roxagent 2>/tmp/go-build-packages.txt
+            pkg_count=$(wc -l < /tmp/go-build-packages.txt)
+            echo "Packages recompiled: $pkg_count"
+            if [[ "$pkg_count" -gt 0 ]]; then
+              echo "First 20:"
+              head -20 /tmp/go-build-packages.txt
+              if [[ "$pkg_count" -gt 20 ]]; then
+                echo "... ($pkg_count total)"
               fi
-            ) &
-            GO_PID=$!
-          else
-            echo "--- Go binaries restored from cache ---"
-            ls -lh bin/linux_${{ env.GOARCH }}/ | head -5
-            GO_PID=""
-          fi
+            else
+              echo "All packages from GOCACHE — only linking needed"
+            fi
+          ) &
+          GO_PID=$!
 
           # Start UI build in background if not cached
           ui_start=$SECONDS
@@ -180,12 +171,8 @@ jobs:
 
           # Wait for both to complete
           exit_code=0
-          if [[ -n "$GO_PID" ]]; then
-            wait $GO_PID || exit_code=$?
-            echo "::notice::Go build: $((SECONDS - go_start))s"
-          else
-            echo "::notice::Go build: skipped (cache hit)"
-          fi
+          wait $GO_PID || exit_code=$?
+          echo "::notice::Go build: $((SECONDS - go_start))s"
           if [[ -n "$UI_PID" ]]; then
             wait $UI_PID || exit_code=$?
             echo "::notice::UI build: $((SECONDS - ui_start))s"
@@ -228,16 +215,6 @@ jobs:
           wait
           echo "::notice::Docker build: $((SECONDS - docker_start))s"
 
-      # Save caches only on master or when ci-seed-cache label is present
-      - name: Save Go binaries cache
-        if: |
-          steps.restore-go-binaries.outputs.cache-hit != 'true' &&
-          (github.ref == 'refs/heads/master' || contains(github.event.pull_request.labels.*.name, 'ci-seed-cache'))
-        uses: actions/cache/save@v4
-        with:
-          key: go-binaries-${{ env.GOARCH }}-${{ hashFiles('**/*.go', 'go.mod', 'go.sum') }}
-          path: bin/linux_${{ env.GOARCH }}
-
       - name: Save UI build cache
         if: |
           steps.restore-ui-build.outputs.cache-hit != 'true' &&
@@ -264,13 +241,15 @@ jobs:
           echo "=== Docker images ==="
           docker images --format "table {{.Repository}}\t{{.Tag}}\t{{.Size}}" 2>/dev/null
           echo ""
+          echo "=== GOCACHE stats ==="
+          echo "GOCACHE size after build: $(du -sh "$(go env GOCACHE)" 2>/dev/null | cut -f1)"
+          echo ""
           echo "=== Job summary ==="
           {
             echo "| Metric | Value |"
             echo "|--------|-------|"
-            echo "| Go cache | ${{ steps.restore-go-binaries.outputs.cache-hit == 'true' && 'HIT' || 'MISS' }} |"
             echo "| UI cache | ${{ steps.restore-ui-build.outputs.cache-hit == 'true' && 'HIT' || 'MISS' }} |"
-            echo "| Go binary cache key | \`go-binaries-${{ env.GOARCH }}-...\` |"
+            echo "| GOCACHE strategy | Always build, GOCACHE provides incremental compilation |"
             echo "| Commit | ${{ github.sha }} |"
           } >> "$GITHUB_STEP_SUMMARY"
 
