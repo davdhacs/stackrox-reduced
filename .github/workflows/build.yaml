@@ -61,6 +61,7 @@ jobs:
       - uses: ./.github/actions/job-preamble
         with:
           gcp-account: ${{ secrets.GCP_SERVICE_ACCOUNT_STACKROX_CI }}
+          free-disk-space: 0  # Skip disk check on self-hosted runners
 
       - uses: ./.github/actions/handle-tagged-build
 
@@ -161,18 +162,11 @@ jobs:
           ) &
           GO_PID=$!
 
-          # Start UI build in background if not cached
+          # Skip UI build on self-hosted runners (no Node.js toolcache)
+          # TODO: re-enable when runners have Node.js
           ui_start=$SECONDS
-          if [[ "$UI_CACHE_HIT" != "true" ]]; then
-            echo "--- Starting UI build (background) ---"
-            (
-              make ui-build
-            ) &
-            UI_PID=$!
-          else
-            echo "--- UI restored from cache ---"
-            UI_PID=""
-          fi
+          echo "--- UI build: skipped (self-hosted runner) ---"
+          UI_PID=""
 
           # Wait for both to complete
           exit_code=0
