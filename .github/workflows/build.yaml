@@ -186,12 +186,10 @@ jobs:
           # Use same cache tag format as build-and-push-main to share cache
           cache_tag="main-${GOARCH}-master-${ROX_PRODUCT_BRANDING,,}"
 
-          # Build cache args: always read from master cache
+          # Build cache args: always read from cache
           cache_args="--cache-from type=registry,ref=${cache_registry}/${cache_image}:${cache_tag}"
-          # Only write cache on master branch pushes
-          if [[ "${{ github.event_name }}" == "push" && "${{ github.ref }}" == "refs/heads/master" ]]; then
-            cache_args="${cache_args} --cache-to type=registry,ref=${cache_registry}/${cache_image}:${cache_tag},mode=max,ignore-error=true"
-          fi
+          # Always write Docker layer cache (uses GHCR, no size limit, scoped to this repo)
+          cache_args="${cache_args} --cache-to type=registry,ref=${cache_registry}/${cache_image}:${cache_tag},mode=max,ignore-error=true"
 
           # Create placeholder directories for all-in-one build
           # THIRD_PARTY_NOTICES would normally come from pre-build-oss-notice job
