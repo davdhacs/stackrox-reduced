@@ -304,10 +304,10 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   define-job-matrix:
-    if: false  # Disabled on fork - only all-in-one needed for testing
+    # re-enabled for full pipeline testing
     outputs:
       matrix: ${{ steps.define-job-matrix.outputs.matrix }}
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -468,7 +468,7 @@ jobs:
       ROX_PRODUCT_BRANDING: ${{ matrix.branding }}
       # For consistency with `image/rhel/konflux.Dockerfile`, see comment there.
       UI_PKG_INSTALL_EXTRA_ARGS: --ignore-scripts
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     steps:
       - name: Collect Workflow Telemetry
         uses: catchpoint/workflow-telemetry-action@v2
@@ -534,8 +534,8 @@ jobs:
 
   # Generate OSS notice in parallel - needs UI deps but runs independently
   pre-build-oss-notice:
-    if: false  # Disabled on fork
-    runs-on: ubuntu-latest
+    # re-enabled for full pipeline testing
+    runs-on: self-hosted
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -585,7 +585,7 @@ jobs:
   # Non-PRs: adds linux-arm64, linux-ppc64le, linux-s390x (6 jobs)
   pre-build-cli:
     needs: define-job-matrix
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     strategy:
       fail-fast: false
       matrix: ${{ fromJson(needs.define-job-matrix.outputs.matrix).pre_build_cli }}
@@ -634,7 +634,7 @@ jobs:
 
   # Merge CLI artifacts from parallel builds into single artifact
   pre-build-cli-merge:
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     needs: pre-build-cli
     steps:
       - uses: actions/download-artifact@v4
@@ -670,7 +670,7 @@ jobs:
       GOOS: linux
       GOARCH: ${{ matrix.arch }}
     needs: define-job-matrix
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     steps:
       - name: Collect Workflow Telemetry
         uses: catchpoint/workflow-telemetry-action@v2
@@ -764,8 +764,8 @@ jobs:
 
   # Merge Go binary artifacts from parallel component builds into single artifact per arch/name
   pre-build-go-binaries-merge:
-    if: false  # Disabled on fork
-    runs-on: ubuntu-latest
+    # re-enabled for full pipeline testing
+    runs-on: self-hosted
     needs:
       - define-job-matrix
       - pre-build-go-binaries
@@ -796,8 +796,8 @@ jobs:
           path: go-binaries-build.tgz
 
   pre-build-docs:
-    if: false  # Disabled on fork
-    runs-on: ubuntu-latest
+    # re-enabled for full pipeline testing
+    runs-on: self-hosted
     steps:
       - name: Collect Workflow Telemetry
         uses: catchpoint/workflow-telemetry-action@v2
@@ -867,7 +867,7 @@ jobs:
             image/rhel/docs
 
   pre-build-operator-bundle:
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     needs: define-job-matrix
     # Only run if operator build is needed (matrix has operator entries)
     if: ${{ fromJson(needs.define-job-matrix.outputs.matrix).build_and_push_operator.arch[0] != null }}
@@ -971,8 +971,8 @@ jobs:
           path: operator-bundle.tgz
 
   build-and-push-main:
-    if: false  # Disabled on fork
-    runs-on: ubuntu-latest
+    # re-enabled for full pipeline testing
+    runs-on: self-hosted
     needs:
       - define-job-matrix
       - pre-build-ui
@@ -984,7 +984,7 @@ jobs:
     # approach as much of the build matrix as possible is completed despite
     # transient issues e.g. docker pull timeouts. In this way some e2e jobs that
     # require some part of the build matrix can still proceed.
-    # if: ${{ !cancelled() }}  # original condition, overridden by if: false above
+    if: ${{ !cancelled() }}
     strategy:
       # Supports four image builds (see Setup build env):
       # STACKROX_BRANDING
@@ -1183,8 +1183,8 @@ jobs:
             push_matching_collector_scanner_images "${{ env.ROX_PRODUCT_BRANDING }}" "${{ matrix.arch }}"
 
   push-main-manifests:
-    if: false  # Disabled on fork
-    runs-on: ubuntu-latest
+    # re-enabled for full pipeline testing
+    runs-on: self-hosted
     needs:
     - define-job-matrix
     - build-and-push-main
@@ -1193,7 +1193,7 @@ jobs:
     # completed despite transient issues e.g. docker pull timeouts. In this way
     # some e2e jobs that require some part of the build matrix can still
     # proceed.
-    # if: ${{ !cancelled() }}  # original condition, overridden by if: false above
+    if: ${{ !cancelled() }}
     strategy:
       # Supports four image builds (see Setup build env):
       # STACKROX_BRANDING
@@ -1296,13 +1296,13 @@ jobs:
         EOT
 
   build-and-push-operator:
-    if: false  # Disabled on fork
-    runs-on: ubuntu-latest
+    # re-enabled for full pipeline testing
+    runs-on: self-hosted
     needs:
       - define-job-matrix
       - pre-build-operator-bundle
     # Run even if pre-build-operator-bundle was skipped (e.g., fork PRs)
-    # if: ${{ !cancelled() }}  # original condition, overridden by if: false above
+    if: ${{ !cancelled() }}
     env:
       QUAY_RHACS_ENG_RW_USERNAME: ${{ secrets.QUAY_RHACS_ENG_RW_USERNAME }}
       QUAY_RHACS_ENG_RW_PASSWORD: ${{ secrets.QUAY_RHACS_ENG_RW_PASSWORD }}
@@ -1497,8 +1497,8 @@ jobs:
           path: operator/.gotools
 
   push-operator-manifests:
-    if: false  # Disabled on fork
-    runs-on: ubuntu-latest
+    # re-enabled for full pipeline testing
+    runs-on: self-hosted
     needs:
     - define-job-matrix
     - build-and-push-operator
@@ -1507,7 +1507,7 @@ jobs:
     # completed despite transient issues e.g. docker pull timeouts. In this way
     # some e2e jobs that require some part of the build matrix can still
     # proceed.
-    # if: ${{ !cancelled() }}  # original condition, overridden by if: false above
+    if: ${{ !cancelled() }}
     strategy:
       # Supports image builds (see Setup build env):
       # RHACS_BRANDING
@@ -1564,10 +1564,10 @@ jobs:
         push_operator_manifest_lists "$push_context" "${{ env.ROX_PRODUCT_BRANDING }}" ${{ matrix.archs }}
 
   scan-go-binaries:
-    if: false  # Disabled on fork
+    # re-enabled for full pipeline testing
     env:
       ARTIFACT_DIR: junit-reports/
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     needs:
     - pre-build-cli-merge
     - pre-build-go-binaries-merge
@@ -1617,14 +1617,14 @@ jobs:
         directory: 'junit-reports'
 
   scan-images-with-roxctl:
-    if: false  # Disabled on fork
+    # re-enabled for full pipeline testing
     needs:
       - define-job-matrix
       - build-and-push-main
       - build-and-push-operator
       - push-main-manifests
     name: Check images for vulnerabilities
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     permissions:
       # Needed for stackrox/central-login to create the JWT token.
       id-token: write
@@ -1677,18 +1677,18 @@ jobs:
       #     sarif_file: results.sarif
 
   slack-on-build-failure:
-    if: false  # Disabled on fork
+    # re-enabled for full pipeline testing
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       SLACK_CI_INTEGRATION_TESTING_WEBHOOK: ${{ secrets.SLACK_CI_INTEGRATION_TESTING_WEBHOOK }}
       TEST_FAILURES_NOTIFY_WEBHOOK: ${{ secrets.TEST_FAILURES_NOTIFY_WEBHOOK }}
-    # if: |  # original condition, overridden by if: false above
-    #   failure() && (
-    #       github.event_name == 'push' ||
-    #       contains(github.event.pull_request.labels.*.name, 'ci-test-github-action-slack-messages')
-    #   )
+    if: |
+      failure() && (
+          github.event_name == 'push' ||
+          contains(github.event.pull_request.labels.*.name, 'ci-test-github-action-slack-messages')
+      )
     name: Post failure message to Slack
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     needs:
       - pre-build-ui
       - pre-build-cli-merge
@@ -1718,11 +1718,11 @@ jobs:
 
   # Option A: Build Go inside Docker (multi-stage build with layer caching)
   experimental-go-in-docker:
-    if: false  # Disabled on fork
-    runs-on: ubuntu-latest
+    # re-enabled for full pipeline testing
+    runs-on: self-hosted
     needs: define-job-matrix
     # Only run on PRs with the experimental label
-    # if: contains(github.event.pull_request.labels.*.name, 'ci-experiment-go-in-docker')  # overridden
+    if: contains(github.event.pull_request.labels.*.name, 'ci-experiment-go-in-docker')
     steps:
       - name: Collect Workflow Telemetry
         uses: catchpoint/workflow-telemetry-action@v2
@@ -1884,15 +1884,15 @@ jobs:
 
   # Option B: Build Go in same job (no pre-build, no artifacts)
   experimental-go-same-job:
-    if: false  # Disabled on fork
-    runs-on: ubuntu-latest
+    # re-enabled for full pipeline testing
+    runs-on: self-hosted
     needs:
       - define-job-matrix
       - pre-build-ui  # Still need UI
       - pre-build-docs  # Still need docs
       - pre-build-oss-notice  # Need THIRD_PARTY_NOTICES
     # Only run on PRs with the experimental label
-    # if: contains(github.event.pull_request.labels.*.name, 'ci-experiment-go-same-job')  # overridden
+    if: contains(github.event.pull_request.labels.*.name, 'ci-experiment-go-same-job')
     steps:
       - name: Collect Workflow Telemetry
         uses: catchpoint/workflow-telemetry-action@v2
