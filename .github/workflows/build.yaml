@@ -26,7 +26,7 @@ defaults:
 
 jobs:
   all-in-one:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     env:
       GOOS: linux
       GOARCH: amd64
@@ -95,7 +95,10 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       - name: Checkout submodules
-        run: git submodule update --init
+        run: |
+          sub_start=$SECONDS
+          git submodule update --init
+          echo "::notice::Submodule checkout: $((SECONDS - sub_start))s"
 
       - name: Setup build env for debugging support
         run: |
@@ -214,6 +217,50 @@ jobs:
           make build-main-image &
           wait
           echo "::notice::Docker build: $((SECONDS - docker_start))s"
+
+      # === EXPERIMENTS: measure incremental rebuild on this CI runner ===
+      - name: "Experiment: no-op rebuild (GOCACHE warm)"
+        env:
+          CI: "true"
+        run: |
+          echo "=== Rebuilding all binaries with warm GOCACHE (no changes) ==="
+          echo "This measures the 'next PR push' baseline on CI runners."
+          noop_start=$SECONDS
+          ./scripts/go-build.sh \
+            central \
+            compliance/cmd/compliance \
+            config-controller \
+            migrator \
+            sensor/admission-control \
+            sensor/kubernetes \
+            sensor/upgrader \
+            roxctl \
+            compliance/virtualmachines/roxagent 2>/dev/null
+          echo "::notice::EXPERIMENT no-op rebuild (warm GOCACHE): $((SECONDS - noop_start))s"
+
+      - name: "Experiment: rebuild after deleting binaries (GOCACHE relink test)"
+        env:
+          CI: "true"
+        run: |
+          echo "=== Deleting binaries and rebuilding from GOCACHE ==="
+          echo "This measures the relink-only cost when GOCACHE has all objects."
+          rm -rf bin/linux_amd64/*
+          relink_start=$SECONDS
+          GOFLAGS="-v" ./scripts/go-build.sh \
+            central \
+            compliance/cmd/compliance \
+            config-controller \
+            migrator \
+            sensor/admission-control \
+            sensor/kubernetes \
+            sensor/upgrader \
+            roxctl \
+            compliance/virtualmachines/roxagent 2>/tmp/relink-packages.txt
+          echo "::notice::EXPERIMENT relink from GOCACHE: $((SECONDS - relink_start))s"
+          echo "Packages recompiled: $(wc -l < /tmp/relink-packages.txt)"
+          if [[ -s /tmp/relink-packages.txt ]]; then
+            head -10 /tmp/relink-packages.txt
+          fi
 
       - name: Save UI build cache
         if: |
@@ -418,7 +465,7 @@ jobs:
       ROX_PRODUCT_BRANDING: ${{ matrix.branding }}
       # For consistency with `image/rhel/konflux.Dockerfile`, see comment there.
       UI_PKG_INSTALL_EXTRA_ARGS: --ignore-scripts
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     steps:
       - name: Collect Workflow Telemetry
         uses: catchpoint/workflow-telemetry-action@v2
@@ -485,7 +532,7 @@ jobs:
   # Generate OSS notice in parallel - needs UI deps but runs independently
   pre-build-oss-notice:
     if: false  # Disabled on fork
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -535,7 +582,7 @@ jobs:
   # Non-PRs: adds linux-arm64, linux-ppc64le, linux-s390x (6 jobs)
   pre-build-cli:
     needs: define-job-matrix
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix: ${{ fromJson(needs.define-job-matrix.outputs.matrix).pre_build_cli }}
@@ -584,7 +631,7 @@ jobs:
 
   # Merge CLI artifacts from parallel builds into single artifact
   pre-build-cli-merge:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     needs: pre-build-cli
     steps:
       - uses: actions/download-artifact@v4
@@ -620,7 +667,7 @@ jobs:
       GOOS: linux
       GOARCH: ${{ matrix.arch }}
     needs: define-job-matrix
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     steps:
       - name: Collect Workflow Telemetry
         uses: catchpoint/workflow-telemetry-action@v2
@@ -715,7 +762,7 @@ jobs:
   # Merge Go binary artifacts from parallel component builds into single artifact per arch/name
   pre-build-go-binaries-merge:
     if: false  # Disabled on fork
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     needs:
       - define-job-matrix
       - pre-build-go-binaries
@@ -747,7 +794,7 @@ jobs:
 
   pre-build-docs:
     if: false  # Disabled on fork
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     steps:
       - name: Collect Workflow Telemetry
         uses: catchpoint/workflow-telemetry-action@v2
@@ -817,7 +864,7 @@ jobs:
             image/rhel/docs
 
   pre-build-operator-bundle:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     needs: define-job-matrix
     # Only run if operator build is needed (matrix has operator entries)
     if: ${{ fromJson(needs.define-job-matrix.outputs.matrix).build_and_push_operator.arch[0] != null }}
@@ -922,7 +969,7 @@ jobs:
 
   build-and-push-main:
     if: false  # Disabled on fork
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     needs:
       - define-job-matrix
       - pre-build-ui
@@ -1247,7 +1294,7 @@ jobs:
 
   build-and-push-operator:
     if: false  # Disabled on fork
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     needs:
       - define-job-matrix
       - pre-build-operator-bundle
@@ -1669,7 +1716,7 @@ jobs:
   # Option A: Build Go inside Docker (multi-stage build with layer caching)
   experimental-go-in-docker:
     if: false  # Disabled on fork
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     needs: define-job-matrix
     # Only run on PRs with the experimental label
     # if: contains(github.event.pull_request.labels.*.name, 'ci-experiment-go-in-docker')  # overridden
@@ -1835,7 +1882,7 @@ jobs:
   # Option B: Build Go in same job (no pre-build, no artifacts)
   experimental-go-same-job:
     if: false  # Disabled on fork
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     needs:
       - define-job-matrix
       - pre-build-ui  # Still need UI

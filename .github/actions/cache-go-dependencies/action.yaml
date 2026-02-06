@@ -1,5 +1,5 @@
 name: Cache Go Dependencies
-description: Cache Go Dependencies (restore-only for PRs, save on master)
+description: Cache GOCACHE + GOMODCACHE (save on master, restore on PRs)
 inputs:
   save-cache:
     description: 'Whether to save cache after job completes (default: only on master)'
@@ -13,22 +13,23 @@ runs:
       run: |
         echo "GOCACHE=$(go env GOCACHE)" >> "$GITHUB_OUTPUT"
         echo "GOMODCACHE=$(go env GOMODCACHE)" >> "$GITHUB_OUTPUT"
-        echo "GOARCH=$(go env GOARCH)" >> "$GITHUB_OUTPUT"
-        # Cache key for Go build cache and module cache
-        # Note: We intentionally exclude the OS version (ubuntu22 vs ubuntu24) from the key
-        # because Go compiles to static binaries that work across Linux versions.
-        # This allows cache sharing between different runner versions.
+        # Cache key: platform + arch + Go version + commit SHA.
+        # No go.sum hash — GOCACHE objects are valid even when deps change
+        # (Go checks each package's content hash independently).
+        # Each master commit saves a fresh GOCACHE. PRs restore the latest
+        # master cache via prefix match.
         platform=${RUNNER_OS:-Linux}
         arch=${RUNNER_ARCH:-X64}
-        arch=${arch,,}  # js process.arch is lowercase
+        arch=${arch,,}
         versionSpec="$(go env GOVERSION)"
         versionSpec=${versionSpec#go}
-        echo "key=${platform}-${arch}-go-${versionSpec}" >> "$GITHUB_OUTPUT"
+        echo "key-prefix=gocache-${platform}-${arch}-go-${versionSpec}" >> "$GITHUB_OUTPUT"
         # Determine if we should save cache
         save_cache="${{ inputs.save-cache }}"
         if [[ "$save_cache" == "auto" ]]; then
-          # Only save on master branch pushes, not PRs
-          if [[ "${{ github.event_name }}" == "push" && "${{ github.ref }}" == "refs/heads/master" ]]; then
+          # Save on master pushes, or when ci-seed-cache label is present (for fork testing)
+          if [[ "${{ github.event_name }}" == "push" && "${{ github.ref }}" == "refs/heads/master" ]] || \
+             [[ "${{ contains(github.event.pull_request.labels.*.name, 'ci-seed-cache') }}" == "true" ]]; then
             save_cache="true"
           else
             save_cache="false"
@@ -44,22 +45,39 @@ runs:
         path: |
           ${{ steps.cache-vars.outputs.GOCACHE }}
           ${{ steps.cache-vars.outputs.GOMODCACHE }}
-        key: setup-go-${{ steps.cache-vars.outputs.key }}-${{ hashFiles('**/go.sum') }}
+        key: ${{ steps.cache-vars.outputs.key-prefix }}-${{ github.sha }}
         restore-keys: |
-          setup-go-${{ steps.cache-vars.outputs.key }}-
-          setup-go-Linux-x64-
+          ${{ steps.cache-vars.outputs.key-prefix }}-
 
     - name: Download Go modules
       run: |
         make deps --always-make
       shell: bash
 
-    # Save cache only on master (runs as post step at end of job)
+    # Save after the job completes (GOCACHE will contain compiled objects
+    # from this build, ready for subsequent jobs to reuse)
     - name: Save Go cache
-      if: steps.cache-vars.outputs.save-cache == 'true' && steps.cache-restore.outputs.cache-hit != 'true'
+      if: steps.cache-vars.outputs.save-cache == 'true'
       uses: actions/cache/save@v4
       with:
         path: |
           ${{ steps.cache-vars.outputs.GOCACHE }}
           ${{ steps.cache-vars.outputs.GOMODCACHE }}
-        key: setup-go-${{ steps.cache-vars.outputs.key }}-${{ hashFiles('**/go.sum') }}
+        key: ${{ steps.cache-vars.outputs.key-prefix }}-${{ github.sha }}
+
+    # Clean up old GOCACHE entries to stay within the 10 GiB cache budget.
+    # Keep only the entry we just saved; delete older ones with the same prefix.
+    - name: Clean up old Go caches
+      if: steps.cache-vars.outputs.save-cache == 'true'
+      run: |
+        echo "Cleaning up old gocache entries..."
+        current_key="${{ steps.cache-vars.outputs.key-prefix }}-${{ github.sha }}"
+        gh cache list --json id,key --limit 20 2>/dev/null | \
+          jq -r ".[] | select(.key | startswith(\"${{ steps.cache-vars.outputs.key-prefix }}-\")) | select(.key != \"${current_key}\") | .id" | \
+          while read id; do
+            gh cache delete "$id" 2>/dev/null && echo "  Deleted old cache $id"
+          done
+        echo "Done"
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
