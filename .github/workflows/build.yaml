@@ -88,10 +88,12 @@ jobs:
         uses: ./.github/actions/cache-go-dependencies
 
       - name: Login to ghcr.io for docker layer caching
+        if: runner.name != 'colima-runner'  # Skip on self-hosted (no Docker)
         run: |
           echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
 
       - name: Set up Docker Buildx
+        if: runner.name != 'colima-runner'
         uses: docker/setup-buildx-action@v3
 
       - name: Checkout submodules
@@ -187,6 +189,7 @@ jobs:
           exit $exit_code
 
       - name: Build Docker images
+        if: runner.name != 'colima-runner'  # Skip on self-hosted (no Docker)
         run: |
           docker_start=$SECONDS
           cache_registry='ghcr.io'
