@@ -121,15 +121,28 @@ jobs:
           GO_CACHE_HIT: ${{ steps.restore-go-binaries.outputs.cache-hit }}
           UI_CACHE_HIT: ${{ steps.restore-ui-build.outputs.cache-hit }}
         run: |
-          echo "=== Building Go and UI in parallel ==="
-          echo "Go cache hit: $GO_CACHE_HIT"
-          echo "UI cache hit: $UI_CACHE_HIT"
+          total_start=$SECONDS
+          echo "=== Cache status ==="
+          echo "Go binaries cache: ${GO_CACHE_HIT:-miss}"
+          echo "UI build cache: ${UI_CACHE_HIT:-miss}"
+          echo ""
+
+          # Time generate-version.sh separately
+          echo "=== generate-version.sh ==="
+          vs_start=$SECONDS
+          ./scripts/generate-version.sh
+          echo "::notice::generate-version.sh: $((SECONDS - vs_start))s"
+          echo "Generated file:"
+          cat pkg/version/internal/version_data_generated.go
+          echo ""
 
           # Start Go build in background if not cached
+          go_start=$SECONDS
           if [[ "$GO_CACHE_HIT" != "true" ]]; then
-            echo "--- Starting Go build (background) ---"
+            echo "--- Starting Go build (background, -v to show recompiled packages) ---"
             (
-              time ./scripts/go-build.sh \
+              # Use -v via GOFLAGS so go-build.sh passes it through
+              GOFLAGS="${GOFLAGS:-} -v" ./scripts/go-build.sh \
                 central \
                 compliance/cmd/compliance \
                 config-controller \
@@ -138,8 +151,12 @@ jobs:
                 sensor/kubernetes \
                 sensor/upgrader \
                 roxctl \
-                compliance/virtualmachines/roxagent
-              echo "Go build complete"
+                compliance/virtualmachines/roxagent 2>/tmp/go-build-packages.txt
+              echo "Packages compiled: $(wc -l < /tmp/go-build-packages.txt)"
+              if [[ -s /tmp/go-build-packages.txt ]]; then
+                echo "First 20 recompiled packages:"
+                head -20 /tmp/go-build-packages.txt
+              fi
             ) &
             GO_PID=$!
           else
@@ -149,11 +166,11 @@ jobs:
           fi
 
           # Start UI build in background if not cached
+          ui_start=$SECONDS
           if [[ "$UI_CACHE_HIT" != "true" ]]; then
             echo "--- Starting UI build (background) ---"
             (
               make ui-build
-              echo "UI build complete"
             ) &
             UI_PID=$!
           else
@@ -165,16 +182,23 @@ jobs:
           exit_code=0
           if [[ -n "$GO_PID" ]]; then
             wait $GO_PID || exit_code=$?
+            echo "::notice::Go build: $((SECONDS - go_start))s"
+          else
+            echo "::notice::Go build: skipped (cache hit)"
           fi
           if [[ -n "$UI_PID" ]]; then
             wait $UI_PID || exit_code=$?
+            echo "::notice::UI build: $((SECONDS - ui_start))s"
+          else
+            echo "::notice::UI build: skipped (cache hit)"
           fi
 
-          echo "=== Parallel builds complete ==="
+          echo "::notice::Total build step: $((SECONDS - total_start))s"
           exit $exit_code
 
       - name: Build Docker images
         run: |
+          docker_start=$SECONDS
           cache_registry='ghcr.io'
           cache_image="${GITHUB_REPOSITORY,,}"
           # Use same cache tag format as build-and-push-main to share cache
@@ -202,6 +226,7 @@ jobs:
           make central-db-image &
           make build-main-image &
           wait
+          echo "::notice::Docker build: $((SECONDS - docker_start))s"
 
       # Save caches only on master or when ci-seed-cache label is present
       - name: Save Go binaries cache
@@ -225,13 +250,32 @@ jobs:
       - name: Verify build artifacts
         if: always()
         run: |
-          echo "=== Docker images ==="
-          docker images --format "table {{.Repository}}\t{{.Tag}}\t{{.Size}}"
+          echo "=== Version info (buildvcs test) ==="
+          if [[ -f bin/linux_amd64/roxctl ]]; then
+            bin/linux_amd64/roxctl version 2>/dev/null || echo "(roxctl version failed - expected on cross-compiled binary)"
+            echo ""
+            echo "Build info:"
+            go version -m bin/linux_amd64/roxctl 2>/dev/null | grep -E "vcs\.|mod\s" || true
+          fi
           echo ""
-          echo "=== Built binaries ==="
-          ls -lh bin/linux_amd64/
+          echo "=== Binary sizes ==="
+          ls -lhS bin/linux_amd64/ 2>/dev/null | head -15
+          echo ""
+          echo "=== Docker images ==="
+          docker images --format "table {{.Repository}}\t{{.Tag}}\t{{.Size}}" 2>/dev/null
+          echo ""
+          echo "=== Job summary ==="
+          {
+            echo "| Metric | Value |"
+            echo "|--------|-------|"
+            echo "| Go cache | ${{ steps.restore-go-binaries.outputs.cache-hit == 'true' && 'HIT' || 'MISS' }} |"
+            echo "| UI cache | ${{ steps.restore-ui-build.outputs.cache-hit == 'true' && 'HIT' || 'MISS' }} |"
+            echo "| Go binary cache key | \`go-binaries-${{ env.GOARCH }}-...\` |"
+            echo "| Commit | ${{ github.sha }} |"
+          } >> "$GITHUB_STEP_SUMMARY"
 
   define-job-matrix:
+    if: false  # Disabled on fork - only all-in-one needed for testing
     outputs:
       matrix: ${{ steps.define-job-matrix.outputs.matrix }}
     runs-on: ubuntu-latest
@@ -461,6 +505,7 @@ jobs:
 
   # Generate OSS notice in parallel - needs UI deps but runs independently
   pre-build-oss-notice:
+    if: false  # Disabled on fork
     runs-on: ubuntu-22.04
     steps:
       - name: Checkout
@@ -690,6 +735,7 @@ jobs:
 
   # Merge Go binary artifacts from parallel component builds into single artifact per arch/name
   pre-build-go-binaries-merge:
+    if: false  # Disabled on fork
     runs-on: ubuntu-22.04
     needs:
       - define-job-matrix
@@ -721,6 +767,7 @@ jobs:
           path: go-binaries-build.tgz
 
   pre-build-docs:
+    if: false  # Disabled on fork
     runs-on: ubuntu-22.04
     steps:
       - name: Collect Workflow Telemetry
@@ -895,6 +942,7 @@ jobs:
           path: operator-bundle.tgz
 
   build-and-push-main:
+    if: false  # Disabled on fork
     runs-on: ubuntu-22.04
     needs:
       - define-job-matrix
@@ -907,7 +955,7 @@ jobs:
     # approach as much of the build matrix as possible is completed despite
     # transient issues e.g. docker pull timeouts. In this way some e2e jobs that
     # require some part of the build matrix can still proceed.
-    if: ${{ !cancelled() }}
+    # if: ${{ !cancelled() }}  # original condition, overridden by if: false above
     strategy:
       # Supports four image builds (see Setup build env):
       # STACKROX_BRANDING
@@ -1106,6 +1154,7 @@ jobs:
             push_matching_collector_scanner_images "${{ env.ROX_PRODUCT_BRANDING }}" "${{ matrix.arch }}"
 
   push-main-manifests:
+    if: false  # Disabled on fork
     runs-on: ubuntu-latest
     needs:
     - define-job-matrix
@@ -1115,7 +1164,7 @@ jobs:
     # completed despite transient issues e.g. docker pull timeouts. In this way
     # some e2e jobs that require some part of the build matrix can still
     # proceed.
-    if: ${{ !cancelled() }}
+    # if: ${{ !cancelled() }}  # original condition, overridden by if: false above
     strategy:
       # Supports four image builds (see Setup build env):
       # STACKROX_BRANDING
@@ -1218,12 +1267,13 @@ jobs:
         EOT
 
   build-and-push-operator:
+    if: false  # Disabled on fork
     runs-on: ubuntu-22.04
     needs:
       - define-job-matrix
       - pre-build-operator-bundle
     # Run even if pre-build-operator-bundle was skipped (e.g., fork PRs)
-    if: ${{ !cancelled() }}
+    # if: ${{ !cancelled() }}  # original condition, overridden by if: false above
     env:
       QUAY_RHACS_ENG_RW_USERNAME: ${{ secrets.QUAY_RHACS_ENG_RW_USERNAME }}
       QUAY_RHACS_ENG_RW_PASSWORD: ${{ secrets.QUAY_RHACS_ENG_RW_PASSWORD }}
@@ -1418,6 +1468,7 @@ jobs:
           path: operator/.gotools
 
   push-operator-manifests:
+    if: false  # Disabled on fork
     runs-on: ubuntu-latest
     needs:
     - define-job-matrix
@@ -1427,7 +1478,7 @@ jobs:
     # completed despite transient issues e.g. docker pull timeouts. In this way
     # some e2e jobs that require some part of the build matrix can still
     # proceed.
-    if: ${{ !cancelled() }}
+    # if: ${{ !cancelled() }}  # original condition, overridden by if: false above
     strategy:
       # Supports image builds (see Setup build env):
       # RHACS_BRANDING
@@ -1484,8 +1535,7 @@ jobs:
         push_operator_manifest_lists "$push_context" "${{ env.ROX_PRODUCT_BRANDING }}" ${{ matrix.archs }}
 
   scan-go-binaries:
-    if: |
-      contains(github.event.pull_request.labels.*.name, 'scan-go-binaries')
+    if: false  # Disabled on fork
     env:
       ARTIFACT_DIR: junit-reports/
     runs-on: ubuntu-latest
@@ -1538,8 +1588,7 @@ jobs:
         directory: 'junit-reports'
 
   scan-images-with-roxctl:
-    if: github.event_name == 'push' ||
-      contains(github.event.pull_request.labels.*.name, 'scan-images-with-roxctl')
+    if: false  # Disabled on fork
     needs:
       - define-job-matrix
       - build-and-push-main
@@ -1599,15 +1648,16 @@ jobs:
       #     sarif_file: results.sarif
 
   slack-on-build-failure:
+    if: false  # Disabled on fork
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       SLACK_CI_INTEGRATION_TESTING_WEBHOOK: ${{ secrets.SLACK_CI_INTEGRATION_TESTING_WEBHOOK }}
       TEST_FAILURES_NOTIFY_WEBHOOK: ${{ secrets.TEST_FAILURES_NOTIFY_WEBHOOK }}
-    if: |
-      failure() && (
-          github.event_name == 'push' ||
-          contains(github.event.pull_request.labels.*.name, 'ci-test-github-action-slack-messages')
-      )
+    # if: |  # original condition, overridden by if: false above
+    #   failure() && (
+    #       github.event_name == 'push' ||
+    #       contains(github.event.pull_request.labels.*.name, 'ci-test-github-action-slack-messages')
+    #   )
     name: Post failure message to Slack
     runs-on: ubuntu-latest
     needs:
@@ -1639,10 +1689,11 @@ jobs:
 
   # Option A: Build Go inside Docker (multi-stage build with layer caching)
   experimental-go-in-docker:
+    if: false  # Disabled on fork
     runs-on: ubuntu-22.04
     needs: define-job-matrix
     # Only run on PRs with the experimental label
-    if: contains(github.event.pull_request.labels.*.name, 'ci-experiment-go-in-docker')
+    # if: contains(github.event.pull_request.labels.*.name, 'ci-experiment-go-in-docker')  # overridden
     steps:
       - name: Collect Workflow Telemetry
         uses: catchpoint/workflow-telemetry-action@v2
@@ -1804,6 +1855,7 @@ jobs:
 
   # Option B: Build Go in same job (no pre-build, no artifacts)
   experimental-go-same-job:
+    if: false  # Disabled on fork
     runs-on: ubuntu-22.04
     needs:
       - define-job-matrix
@@ -1811,7 +1863,7 @@ jobs:
       - pre-build-docs  # Still need docs
       - pre-build-oss-notice  # Need THIRD_PARTY_NOTICES
     # Only run on PRs with the experimental label
-    if: contains(github.event.pull_request.labels.*.name, 'ci-experiment-go-same-job')
+    # if: contains(github.event.pull_request.labels.*.name, 'ci-experiment-go-same-job')  # overridden
     steps:
       - name: Collect Workflow Telemetry
         uses: catchpoint/workflow-telemetry-action@v2
