@@ -82,6 +82,12 @@ jobs:
           go-version-file: 'go.mod'
           cache: false
 
+      - name: Set Go env vars for later steps
+        run: |
+          echo "GOCACHE_PATH=$(go env GOCACHE)" >> "$GITHUB_ENV"
+          echo "GOMODCACHE_PATH=$(go env GOMODCACHE)" >> "$GITHUB_ENV"
+          echo "GO_VERSION=$(go env GOVERSION | sed 's/^go//')" >> "$GITHUB_ENV"
+
       # Restore GOCACHE + GOMODCACHE from master. This provides compiled object
       # files for all packages, so go build only recompiles changed packages and
       # relinks. No separate binary cache needed — Go's incremental build handles it.
@@ -272,6 +278,24 @@ jobs:
         with:
           key: built-ui-${{ env.ROX_PRODUCT_BRANDING }}-${{ hashFiles('ui/**') }}
           path: ui/build
+
+      # Save GOCACHE here (AFTER the build), not in cache-go-dependencies action
+      # (which runs before the build and only captures module metadata).
+      # The GOCACHE now contains compiled objects from the build (~4 GiB).
+      - name: Save GOCACHE (post-build)
+        if: github.ref == 'refs/heads/master' || contains(github.event.pull_request.labels.*.name, 'ci-seed-cache')
+        run: |
+          echo "GOCACHE size: $(du -sh "$(go env GOCACHE)" 2>/dev/null | cut -f1)"
+          echo "GOCACHE entries: $(find "$(go env GOCACHE)" -type f 2>/dev/null | wc -l)"
+        # Save using the same key format as cache-go-dependencies
+      - name: Save GOCACHE to Actions cache
+        if: github.ref == 'refs/heads/master' || contains(github.event.pull_request.labels.*.name, 'ci-seed-cache')
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ${{ env.GOCACHE_PATH }}
+            ${{ env.GOMODCACHE_PATH }}
+          key: gocache-Linux-x64-go-${{ env.GO_VERSION }}-${{ github.sha }}
 
       - name: Verify build artifacts
         if: always()

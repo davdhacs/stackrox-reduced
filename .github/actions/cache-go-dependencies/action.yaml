@@ -54,30 +54,5 @@ runs:
         make deps --always-make
       shell: bash
 
-    # Save after the job completes (GOCACHE will contain compiled objects
-    # from this build, ready for subsequent jobs to reuse)
-    - name: Save Go cache
-      if: steps.cache-vars.outputs.save-cache == 'true'
-      uses: actions/cache/save@v4
-      with:
-        path: |
-          ${{ steps.cache-vars.outputs.GOCACHE }}
-          ${{ steps.cache-vars.outputs.GOMODCACHE }}
-        key: ${{ steps.cache-vars.outputs.key-prefix }}-${{ github.sha }}
-
-    # Clean up old GOCACHE entries to stay within the 10 GiB cache budget.
-    # Keep only the entry we just saved; delete older ones with the same prefix.
-    - name: Clean up old Go caches
-      if: steps.cache-vars.outputs.save-cache == 'true'
-      run: |
-        echo "Cleaning up old gocache entries..."
-        current_key="${{ steps.cache-vars.outputs.key-prefix }}-${{ github.sha }}"
-        gh cache list --json id,key --limit 20 2>/dev/null | \
-          jq -r ".[] | select(.key | startswith(\"${{ steps.cache-vars.outputs.key-prefix }}-\")) | select(.key != \"${current_key}\") | .id" | \
-          while read id; do
-            gh cache delete "$id" 2>/dev/null && echo "  Deleted old cache $id"
-          done
-        echo "Done"
-      shell: bash
-      env:
-        GH_TOKEN: ${{ github.token }}
+    # NOTE: GOCACHE save is handled by the workflow (after go build),
+    # not here. This action only restores + downloads modules.
