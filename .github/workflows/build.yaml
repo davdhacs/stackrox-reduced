@@ -118,10 +118,13 @@ jobs:
           UI_CACHE_HIT: ${{ steps.restore-ui-build.outputs.cache-hit }}
         run: |
           total_start=$SECONDS
-          echo "=== Cache status ==="
-          echo "UI build cache: ${UI_CACHE_HIT:-miss}"
+          echo "=== GOCACHE diagnostics ==="
           echo "GOCACHE: $(go env GOCACHE)"
-          echo "GOCACHE size: $(du -sh "$(go env GOCACHE)" 2>/dev/null | cut -f1)"
+          echo "GOMODCACHE: $(go env GOMODCACHE)"
+          echo "GOCACHE size before build: $(du -sh "$(go env GOCACHE)" 2>/dev/null | cut -f1 || echo 'empty')"
+          echo "GOMODCACHE size: $(du -sh "$(go env GOMODCACHE)" 2>/dev/null | cut -f1 || echo 'empty')"
+          echo "GOCACHE entries: $(find "$(go env GOCACHE)" -type f 2>/dev/null | wc -l)"
+          echo "UI build cache: ${UI_CACHE_HIT:-miss}"
           echo ""
 
           # Time generate-version.sh separately
@@ -129,38 +132,40 @@ jobs:
           vs_start=$SECONDS
           ./scripts/generate-version.sh
           echo "::notice::generate-version.sh: $((SECONDS - vs_start))s"
-          echo "Generated file:"
           cat pkg/version/internal/version_data_generated.go
           echo ""
 
-          # Always build Go — GOCACHE provides incremental compilation.
-          # Only changed packages recompile; unchanged ones come from GOCACHE.
+          # Build Go — GOCACHE provides incremental compilation.
           go_start=$SECONDS
-          echo "--- Starting Go build (background, -v to show recompiled packages) ---"
-          (
-            GOFLAGS="${GOFLAGS:-} -v" ./scripts/go-build.sh \
-              central \
-              compliance/cmd/compliance \
-              config-controller \
-              migrator \
-              sensor/admission-control \
-              sensor/kubernetes \
-              sensor/upgrader \
-              roxctl \
-              compliance/virtualmachines/roxagent 2>/tmp/go-build-packages.txt
-            pkg_count=$(wc -l < /tmp/go-build-packages.txt)
-            echo "Packages recompiled: $pkg_count"
-            if [[ "$pkg_count" -gt 0 ]]; then
-              echo "First 20:"
-              head -20 /tmp/go-build-packages.txt
-              if [[ "$pkg_count" -gt 20 ]]; then
-                echo "... ($pkg_count total)"
-              fi
-            else
-              echo "All packages from GOCACHE — only linking needed"
+          echo "--- Go build (-v shows recompiled packages) ---"
+          GOFLAGS="${GOFLAGS:-} -v" ./scripts/go-build.sh \
+            central \
+            compliance/cmd/compliance \
+            config-controller \
+            migrator \
+            sensor/admission-control \
+            sensor/kubernetes \
+            sensor/upgrader \
+            roxctl \
+            compliance/virtualmachines/roxagent 2>/tmp/go-build-packages.txt
+          go_elapsed=$((SECONDS - go_start))
+          pkg_count=$(wc -l < /tmp/go-build-packages.txt)
+          echo "::notice::Go build: ${go_elapsed}s (${pkg_count} packages recompiled)"
+          if [[ "$pkg_count" -gt 0 ]]; then
+            echo "First 20 recompiled:"
+            head -20 /tmp/go-build-packages.txt
+            if [[ "$pkg_count" -gt 20 ]]; then
+              echo "... ($pkg_count total)"
             fi
-          ) &
-          GO_PID=$!
+          else
+            echo "All packages from GOCACHE — only linking needed"
+          fi
+
+          echo ""
+          echo "GOCACHE size after build: $(du -sh "$(go env GOCACHE)" 2>/dev/null | cut -f1)"
+          echo "GOCACHE entries after build: $(find "$(go env GOCACHE)" -type f 2>/dev/null | wc -l)"
+
+          echo "::notice::Total build step: $((SECONDS - total_start))s"
 
           # Skip UI build on self-hosted runners (no Node.js toolcache)
           # TODO: re-enable when runners have Node.js
@@ -298,7 +303,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   define-job-matrix:
-    # re-enabled for full pipeline testing
+    if: false  # Disabled until GOCACHE approach is validated
     outputs:
       matrix: ${{ steps.define-job-matrix.outputs.matrix }}
     runs-on: self-hosted
@@ -528,7 +533,7 @@ jobs:
 
   # Generate OSS notice in parallel - needs UI deps but runs independently
   pre-build-oss-notice:
-    # re-enabled for full pipeline testing
+    if: false  # Disabled until GOCACHE approach is validated
     runs-on: self-hosted
     steps:
       - name: Checkout
@@ -758,7 +763,7 @@ jobs:
 
   # Merge Go binary artifacts from parallel component builds into single artifact per arch/name
   pre-build-go-binaries-merge:
-    # re-enabled for full pipeline testing
+    if: false  # Disabled until GOCACHE approach is validated
     runs-on: self-hosted
     needs:
       - define-job-matrix
@@ -790,7 +795,7 @@ jobs:
           path: go-binaries-build.tgz
 
   pre-build-docs:
-    # re-enabled for full pipeline testing
+    if: false  # Disabled until GOCACHE approach is validated
     runs-on: self-hosted
     steps:
       - name: Collect Workflow Telemetry
@@ -965,7 +970,7 @@ jobs:
           path: operator-bundle.tgz
 
   build-and-push-main:
-    # re-enabled for full pipeline testing
+    if: false  # Disabled until GOCACHE approach is validated
     runs-on: self-hosted
     needs:
       - define-job-matrix
@@ -978,7 +983,7 @@ jobs:
     # approach as much of the build matrix as possible is completed despite
     # transient issues e.g. docker pull timeouts. In this way some e2e jobs that
     # require some part of the build matrix can still proceed.
-    if: ${{ !cancelled() }}
+    # if: ${{ !cancelled() }}  # disabled while testing
     strategy:
       # Supports four image builds (see Setup build env):
       # STACKROX_BRANDING
@@ -1177,7 +1182,7 @@ jobs:
             push_matching_collector_scanner_images "${{ env.ROX_PRODUCT_BRANDING }}" "${{ matrix.arch }}"
 
   push-main-manifests:
-    # re-enabled for full pipeline testing
+    if: false  # Disabled until GOCACHE approach is validated
     runs-on: self-hosted
     needs:
     - define-job-matrix
@@ -1187,7 +1192,7 @@ jobs:
     # completed despite transient issues e.g. docker pull timeouts. In this way
     # some e2e jobs that require some part of the build matrix can still
     # proceed.
-    if: ${{ !cancelled() }}
+    # if: ${{ !cancelled() }}  # disabled while testing
     strategy:
       # Supports four image builds (see Setup build env):
       # STACKROX_BRANDING
@@ -1290,13 +1295,13 @@ jobs:
         EOT
 
   build-and-push-operator:
-    # re-enabled for full pipeline testing
+    if: false  # Disabled until GOCACHE approach is validated
     runs-on: self-hosted
     needs:
       - define-job-matrix
       - pre-build-operator-bundle
     # Run even if pre-build-operator-bundle was skipped (e.g., fork PRs)
-    if: ${{ !cancelled() }}
+    # if: ${{ !cancelled() }}  # disabled while testing
     env:
       QUAY_RHACS_ENG_RW_USERNAME: ${{ secrets.QUAY_RHACS_ENG_RW_USERNAME }}
       QUAY_RHACS_ENG_RW_PASSWORD: ${{ secrets.QUAY_RHACS_ENG_RW_PASSWORD }}
@@ -1491,7 +1496,7 @@ jobs:
           path: operator/.gotools
 
   push-operator-manifests:
-    # re-enabled for full pipeline testing
+    if: false  # Disabled until GOCACHE approach is validated
     runs-on: self-hosted
     needs:
     - define-job-matrix
@@ -1501,7 +1506,7 @@ jobs:
     # completed despite transient issues e.g. docker pull timeouts. In this way
     # some e2e jobs that require some part of the build matrix can still
     # proceed.
-    if: ${{ !cancelled() }}
+    # if: ${{ !cancelled() }}  # disabled while testing
     strategy:
       # Supports image builds (see Setup build env):
       # RHACS_BRANDING
@@ -1558,7 +1563,7 @@ jobs:
         push_operator_manifest_lists "$push_context" "${{ env.ROX_PRODUCT_BRANDING }}" ${{ matrix.archs }}
 
   scan-go-binaries:
-    # re-enabled for full pipeline testing
+    if: false  # Disabled until GOCACHE approach is validated
     env:
       ARTIFACT_DIR: junit-reports/
     runs-on: self-hosted
@@ -1611,7 +1616,7 @@ jobs:
         directory: 'junit-reports'
 
   scan-images-with-roxctl:
-    # re-enabled for full pipeline testing
+    if: false  # Disabled until GOCACHE approach is validated
     needs:
       - define-job-matrix
       - build-and-push-main
@@ -1671,16 +1676,16 @@ jobs:
       #     sarif_file: results.sarif
 
   slack-on-build-failure:
-    # re-enabled for full pipeline testing
+    if: false  # Disabled until GOCACHE approach is validated
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       SLACK_CI_INTEGRATION_TESTING_WEBHOOK: ${{ secrets.SLACK_CI_INTEGRATION_TESTING_WEBHOOK }}
       TEST_FAILURES_NOTIFY_WEBHOOK: ${{ secrets.TEST_FAILURES_NOTIFY_WEBHOOK }}
-    if: |
-      failure() && (
-          github.event_name == 'push' ||
-          contains(github.event.pull_request.labels.*.name, 'ci-test-github-action-slack-messages')
-      )
+    # if: |  # disabled while testing
+    #   failure() && (
+    #       github.event_name == 'push' ||
+    #       contains(github.event.pull_request.labels.*.name, 'ci-test-github-action-slack-messages')
+    #   )
     name: Post failure message to Slack
     runs-on: self-hosted
     needs:
@@ -1712,11 +1717,11 @@ jobs:
 
   # Option A: Build Go inside Docker (multi-stage build with layer caching)
   experimental-go-in-docker:
-    # re-enabled for full pipeline testing
+    if: false  # Disabled until GOCACHE approach is validated
     runs-on: self-hosted
     needs: define-job-matrix
     # Only run on PRs with the experimental label
-    if: contains(github.event.pull_request.labels.*.name, 'ci-experiment-go-in-docker')
+    # if: contains(github.event.pull_request.labels.*.name, 'ci-experiment-go-in-docker')
     steps:
       - name: Collect Workflow Telemetry
         uses: catchpoint/workflow-telemetry-action@v2
@@ -1878,7 +1883,7 @@ jobs:
 
   # Option B: Build Go in same job (no pre-build, no artifacts)
   experimental-go-same-job:
-    # re-enabled for full pipeline testing
+    if: false  # Disabled until GOCACHE approach is validated
     runs-on: self-hosted
     needs:
       - define-job-matrix
@@ -1886,7 +1891,7 @@ jobs:
       - pre-build-docs  # Still need docs
       - pre-build-oss-notice  # Need THIRD_PARTY_NOTICES
     # Only run on PRs with the experimental label
-    if: contains(github.event.pull_request.labels.*.name, 'ci-experiment-go-same-job')
+    # if: contains(github.event.pull_request.labels.*.name, 'ci-experiment-go-same-job')
     steps:
       - name: Collect Workflow Telemetry
         uses: catchpoint/workflow-telemetry-action@v2
