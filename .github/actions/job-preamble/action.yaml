@@ -154,9 +154,9 @@ runs:
       id: record_job_info
       env:
         GCP_SERVICE_ACCOUNT_STACKROX_CI: ${{ inputs.gcp-account }}
-      # Skip for external contributions.
+      # Skip when GCP account is not configured or for external contributions.
       if: |
-        github.event_name == 'push' || !github.event.pull_request.head.repo.fork
+        inputs.gcp-account != '' && (github.event_name == 'push' || !github.event.pull_request.head.repo.fork)
       with:
         shell: bash
         run: >
