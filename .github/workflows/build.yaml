@@ -112,12 +112,15 @@ jobs:
           CI: "true"
         run: |
           go_start=$SECONDS
+          # Capture -v output (stderr) while still showing errors
+          # -v prints compiled package names to stderr; real errors also go to stderr
           GOFLAGS="${GOFLAGS:-} -v" ./scripts/go-build.sh \
             central compliance/cmd/compliance config-controller migrator \
             sensor/admission-control sensor/kubernetes sensor/upgrader \
-            roxctl compliance/virtualmachines/roxagent 2>/tmp/go-build-packages.txt
+            roxctl compliance/virtualmachines/roxagent 2>&1 | tee /tmp/go-build-output.txt
           go_elapsed=$((SECONDS - go_start))
-          pkg_count=$(wc -l < /tmp/go-build-packages.txt)
+          # Count compiled packages (lines starting with github.com/ or other module paths)
+          pkg_count=$(grep -c '^[a-z]' /tmp/go-build-output.txt || echo 0)
           echo "::notice::[${{ matrix.cache-strategy }}] Go build: ${go_elapsed}s (${pkg_count} packages recompiled)"
 
       # --- DIAGNOSTICS (after) ---
