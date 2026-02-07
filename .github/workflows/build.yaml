@@ -25,25 +25,20 @@ defaults:
     shell: bash
 
 jobs:
-  all-in-one:
+  # === CACHE EXPERIMENT MATRIX ===
+  # Test 4 caching strategies to find the optimal approach.
+  cache-experiment:
     runs-on: self-hosted
+    strategy:
+      fail-fast: false
+      matrix:
+        cache-strategy: [no-cache, gomodcache-only, full-gocache, trimmed-gocache]
     env:
       GOOS: linux
       GOARCH: amd64
       CGO_ENABLED: 0
-      # Use RHACS_BRANDING to match main build path and share Docker cache
       ROX_PRODUCT_BRANDING: RHACS_BRANDING
     steps:
-      - name: Collect Workflow Telemetry
-        uses: catchpoint/workflow-telemetry-action@v2
-        with:
-          theme: dark
-          comment_on_pr: false
-          job_summary: true
-          metric_frequency: 5
-          proc_trace_sys_enable: false
-          proc_trace_chart_max_count: 100
-
       - name: Checkout
         uses: actions/checkout@v6
         with:
@@ -52,29 +47,10 @@ jobs:
           show-progress: false
           ref: ${{ inputs.commit || github.event.pull_request.head.sha }}
 
-      - name: Fetch tags in background
-        run: |
-          # Fetch tags in background while other setup steps proceed
-          # Tags are needed for make tag/version generation
-          nohup git fetch --quiet --depth=5000 origin +refs/tags/*:refs/tags/* &
-
       - uses: ./.github/actions/job-preamble
         with:
           gcp-account: ${{ secrets.GCP_SERVICE_ACCOUNT_STACKROX_CI }}
-          free-disk-space: 0  # Skip disk check on self-hosted runners
-
-      - uses: ./.github/actions/handle-tagged-build
-
-      # Keep UI cache - changes less frequently than Go code
-      - name: Restore cached UI
-        uses: actions/cache/restore@v4
-        id: restore-ui-build
-        with:
-          key: built-ui-${{ env.ROX_PRODUCT_BRANDING }}-${{ hashFiles('ui/**') }}
-          path: ui/build
-
-      - uses: ./.github/actions/cache-ui-dependencies
-        if: steps.restore-ui-build.outputs.cache-hit != 'true'
+          free-disk-space: 0
 
       - name: Setup Go
         uses: actions/setup-go@v6
@@ -82,249 +58,131 @@ jobs:
           go-version-file: 'go.mod'
           cache: false
 
-      - name: Set Go env vars for later steps
+      - name: Set Go env vars
         run: |
           echo "GOCACHE_PATH=$(go env GOCACHE)" >> "$GITHUB_ENV"
           echo "GOMODCACHE_PATH=$(go env GOMODCACHE)" >> "$GITHUB_ENV"
           echo "GO_VERSION=$(go env GOVERSION | sed 's/^go//')" >> "$GITHUB_ENV"
 
-      # Restore GOCACHE + GOMODCACHE from master. This provides compiled object
-      # files for all packages, so go build only recompiles changed packages and
-      # relinks. No separate binary cache needed — Go's incremental build handles it.
-      - name: Cache Go dependencies
-        uses: ./.github/actions/cache-go-dependencies
+      # --- RESTORE CACHE (varies by strategy) ---
+      - name: "Restore: GOMODCACHE"
+        if: matrix.cache-strategy != 'no-cache'
+        uses: actions/cache/restore@v4
+        id: restore-gomodcache
+        with:
+          path: ${{ env.GOMODCACHE_PATH }}
+          key: exp-gomodcache-${{ github.sha }}
+          restore-keys: exp-gomodcache-
 
-      - name: Login to ghcr.io for docker layer caching
-        if: false  # Skip Docker steps on self-hosted runners (no Docker available)
+      - name: "Restore: GOCACHE"
+        if: matrix.cache-strategy == 'full-gocache' || matrix.cache-strategy == 'trimmed-gocache'
+        uses: actions/cache/restore@v4
+        id: restore-gocache
+        with:
+          path: ${{ env.GOCACHE_PATH }}
+          key: exp-${{ matrix.cache-strategy }}-${{ github.sha }}
+          restore-keys: exp-${{ matrix.cache-strategy }}-
+
+      # --- SETUP ---
+      - name: Download Go modules
         run: |
-          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
-
-      - name: Set up Docker Buildx
-        if: false  # Skip Docker steps on self-hosted runners (no Docker available)
-        uses: docker/setup-buildx-action@v3
+          mod_start=$SECONDS
+          make deps --always-make
+          echo "::notice::[${{ matrix.cache-strategy }}] make deps: $((SECONDS - mod_start))s"
 
       - name: Checkout submodules
+        run: git submodule update --init
+
+      - name: Prepare build
         run: |
-          sub_start=$SECONDS
-          git submodule update --init
-          echo "::notice::Submodule checkout: $((SECONDS - sub_start))s"
+          mkdir -p bin/{darwin_amd64,darwin_arm64,linux_amd64,linux_arm64,linux_ppc64le,linux_s390x,windows_amd64}
+          ./scripts/generate-version.sh
 
-      - name: Setup build env for debugging support
+      # --- DIAGNOSTICS (before) ---
+      - name: "Diagnostics: before build"
         run: |
-          if [[ "${GITHUB_HEAD_REF:-}" =~ -debug ]]; then
-            echo "DEBUG_BUILD=yes" >> "${GITHUB_ENV}"
-          fi
+          echo "=== [${{ matrix.cache-strategy }}] Before build ==="
+          echo "GOCACHE size: $(du -sh "$GOCACHE_PATH" 2>/dev/null | cut -f1 || echo empty)"
+          echo "GOCACHE entries: $(find "$GOCACHE_PATH" -type f 2>/dev/null | wc -l)"
+          echo "GOMODCACHE size: $(du -sh "$GOMODCACHE_PATH" 2>/dev/null | cut -f1 || echo empty)"
 
-      - name: Prepare build directories
-        run: mkdir -p bin/{darwin_amd64,darwin_arm64,linux_amd64,linux_arm64,linux_ppc64le,linux_s390x,windows_amd64}
-
-      - name: Build Go and UI (parallel)
+      # --- BUILD ---
+      - name: Build Go binaries
         env:
           CI: "true"
-          UI_CACHE_HIT: ${{ steps.restore-ui-build.outputs.cache-hit }}
         run: |
-          total_start=$SECONDS
-          echo "=== GOCACHE diagnostics ==="
-          echo "GOCACHE: $(go env GOCACHE)"
-          echo "GOMODCACHE: $(go env GOMODCACHE)"
-          echo "GOCACHE size before build: $(du -sh "$(go env GOCACHE)" 2>/dev/null | cut -f1 || echo 'empty')"
-          echo "GOMODCACHE size: $(du -sh "$(go env GOMODCACHE)" 2>/dev/null | cut -f1 || echo 'empty')"
-          echo "GOCACHE entries: $(find "$(go env GOCACHE)" -type f 2>/dev/null | wc -l)"
-          echo "UI build cache: ${UI_CACHE_HIT:-miss}"
-          echo ""
-
-          # Time generate-version.sh separately
-          echo "=== generate-version.sh ==="
-          vs_start=$SECONDS
-          ./scripts/generate-version.sh
-          echo "::notice::generate-version.sh: $((SECONDS - vs_start))s"
-          cat pkg/version/internal/version_data_generated.go
-          echo ""
-
-          # Build Go — GOCACHE provides incremental compilation.
           go_start=$SECONDS
-          echo "--- Go build (-v shows recompiled packages) ---"
           GOFLAGS="${GOFLAGS:-} -v" ./scripts/go-build.sh \
-            central \
-            compliance/cmd/compliance \
-            config-controller \
-            migrator \
-            sensor/admission-control \
-            sensor/kubernetes \
-            sensor/upgrader \
-            roxctl \
-            compliance/virtualmachines/roxagent 2>/tmp/go-build-packages.txt
+            central compliance/cmd/compliance config-controller migrator \
+            sensor/admission-control sensor/kubernetes sensor/upgrader \
+            roxctl compliance/virtualmachines/roxagent 2>/tmp/go-build-packages.txt
           go_elapsed=$((SECONDS - go_start))
           pkg_count=$(wc -l < /tmp/go-build-packages.txt)
-          echo "::notice::Go build: ${go_elapsed}s (${pkg_count} packages recompiled)"
-          if [[ "$pkg_count" -gt 0 ]]; then
-            echo "First 20 recompiled:"
-            head -20 /tmp/go-build-packages.txt
-            if [[ "$pkg_count" -gt 20 ]]; then
-              echo "... ($pkg_count total)"
-            fi
-          else
-            echo "All packages from GOCACHE — only linking needed"
-          fi
+          echo "::notice::[${{ matrix.cache-strategy }}] Go build: ${go_elapsed}s (${pkg_count} packages recompiled)"
 
-          echo ""
-          echo "GOCACHE size after build: $(du -sh "$(go env GOCACHE)" 2>/dev/null | cut -f1)"
-          echo "GOCACHE entries after build: $(find "$(go env GOCACHE)" -type f 2>/dev/null | wc -l)"
-
-          echo "::notice::Total build step: $((SECONDS - total_start))s"
-
-          # Skip UI build on self-hosted runners (no Node.js toolcache)
-          # TODO: re-enable when runners have Node.js
-          ui_start=$SECONDS
-          echo "--- UI build: skipped (self-hosted runner) ---"
-          UI_PID=""
-
-          # Wait for both to complete
-          exit_code=0
-          wait $GO_PID || exit_code=$?
-          echo "::notice::Go build: $((SECONDS - go_start))s"
-          if [[ -n "$UI_PID" ]]; then
-            wait $UI_PID || exit_code=$?
-            echo "::notice::UI build: $((SECONDS - ui_start))s"
-          else
-            echo "::notice::UI build: skipped (cache hit)"
-          fi
-
-          echo "::notice::Total build step: $((SECONDS - total_start))s"
-          exit $exit_code
-
-      - name: Build Docker images
-        if: false  # Skip Docker steps on self-hosted runners (no Docker available)
+      # --- DIAGNOSTICS (after) ---
+      - name: "Diagnostics: after build"
         run: |
-          docker_start=$SECONDS
-          cache_registry='ghcr.io'
-          cache_image="${GITHUB_REPOSITORY,,}"
-          # Use same cache tag format as build-and-push-main to share cache
-          cache_tag="main-${GOARCH}-master-${ROX_PRODUCT_BRANDING,,}"
+          echo "=== [${{ matrix.cache-strategy }}] After build ==="
+          echo "GOCACHE size: $(du -sh "$GOCACHE_PATH" 2>/dev/null | cut -f1)"
+          echo "GOCACHE entries: $(find "$GOCACHE_PATH" -type f 2>/dev/null | wc -l)"
 
-          # Build cache args: always read from cache
-          cache_args="--cache-from type=registry,ref=${cache_registry}/${cache_image}:${cache_tag}"
-          # Always write Docker layer cache (uses GHCR, no size limit, scoped to this repo)
-          cache_args="${cache_args} --cache-to type=registry,ref=${cache_registry}/${cache_image}:${cache_tag},mode=max,ignore-error=true"
-
-          # Create placeholder directories for all-in-one build
-          # THIRD_PARTY_NOTICES would normally come from pre-build-oss-notice job
-          mkdir -p image/rhel/THIRD_PARTY_NOTICES
-          # Swagger docs would normally come from pre-build-docs job
-          mkdir -p image/rhel/docs/api/v1 image/rhel/docs/api/v2
-          echo '{}' > image/rhel/docs/api/v1/swagger.json
-          echo '{}' > image/rhel/docs/api/v2/swagger.json
-
-          # Copy binaries to image context
-          make copy-binaries-to-image-dir
-
-          # Build all Docker images in parallel with layer caching
-          export DOCKER_BUILD_CACHE_ARGS="${cache_args}"
-          make docker-build-roxctl-image &
-          make central-db-image &
-          make build-main-image &
-          wait
-          echo "::notice::Docker build: $((SECONDS - docker_start))s"
-
-      # === EXPERIMENTS: measure incremental rebuild on this CI runner ===
-      - name: "Experiment: no-op rebuild (GOCACHE warm)"
+      # --- EXPERIMENTS ---
+      - name: "Experiment: no-op rebuild"
         env:
           CI: "true"
         run: |
-          echo "=== Rebuilding all binaries with warm GOCACHE (no changes) ==="
-          echo "This measures the 'next PR push' baseline on CI runners."
           noop_start=$SECONDS
           ./scripts/go-build.sh \
-            central \
-            compliance/cmd/compliance \
-            config-controller \
-            migrator \
-            sensor/admission-control \
-            sensor/kubernetes \
-            sensor/upgrader \
-            roxctl \
-            compliance/virtualmachines/roxagent 2>/dev/null
-          echo "::notice::EXPERIMENT no-op rebuild (warm GOCACHE): $((SECONDS - noop_start))s"
+            central compliance/cmd/compliance config-controller migrator \
+            sensor/admission-control sensor/kubernetes sensor/upgrader \
+            roxctl compliance/virtualmachines/roxagent 2>/dev/null
+          echo "::notice::[${{ matrix.cache-strategy }}] no-op rebuild: $((SECONDS - noop_start))s"
 
-      - name: "Experiment: rebuild after deleting binaries (GOCACHE relink test)"
+      - name: "Experiment: relink from GOCACHE"
         env:
           CI: "true"
         run: |
-          echo "=== Deleting binaries and rebuilding from GOCACHE ==="
-          echo "This measures the relink-only cost when GOCACHE has all objects."
           rm -rf bin/linux_amd64/*
           relink_start=$SECONDS
-          GOFLAGS="-v" ./scripts/go-build.sh \
-            central \
-            compliance/cmd/compliance \
-            config-controller \
-            migrator \
-            sensor/admission-control \
-            sensor/kubernetes \
-            sensor/upgrader \
-            roxctl \
-            compliance/virtualmachines/roxagent 2>/tmp/relink-packages.txt
-          echo "::notice::EXPERIMENT relink from GOCACHE: $((SECONDS - relink_start))s"
-          echo "Packages recompiled: $(wc -l < /tmp/relink-packages.txt)"
-          if [[ -s /tmp/relink-packages.txt ]]; then
-            head -10 /tmp/relink-packages.txt
-          fi
+          ./scripts/go-build.sh \
+            central compliance/cmd/compliance config-controller migrator \
+            sensor/admission-control sensor/kubernetes sensor/upgrader \
+            roxctl compliance/virtualmachines/roxagent 2>/dev/null
+          echo "::notice::[${{ matrix.cache-strategy }}] relink: $((SECONDS - relink_start))s"
 
-      - name: Save UI build cache
+      # --- SAVE CACHE ---
+      - name: "Save: GOMODCACHE"
         if: |
-          steps.restore-ui-build.outputs.cache-hit != 'true' &&
+          matrix.cache-strategy != 'no-cache' &&
           (github.ref == 'refs/heads/master' || contains(github.event.pull_request.labels.*.name, 'ci-seed-cache'))
         uses: actions/cache/save@v4
         with:
-          key: built-ui-${{ env.ROX_PRODUCT_BRANDING }}-${{ hashFiles('ui/**') }}
-          path: ui/build
+          path: ${{ env.GOMODCACHE_PATH }}
+          key: exp-gomodcache-${{ github.sha }}
 
-      # Save GOCACHE here (AFTER the build), not in cache-go-dependencies action
-      # (which runs before the build and only captures module metadata).
-      # The GOCACHE now contains compiled objects from the build (~4 GiB).
-      - name: Save GOCACHE (post-build)
-        if: github.ref == 'refs/heads/master' || contains(github.event.pull_request.labels.*.name, 'ci-seed-cache')
+      - name: "Trim GOCACHE (remove project code, keep deps)"
+        if: matrix.cache-strategy == 'trimmed-gocache'
         run: |
-          echo "GOCACHE size: $(du -sh "$(go env GOCACHE)" 2>/dev/null | cut -f1)"
-          echo "GOCACHE entries: $(find "$(go env GOCACHE)" -type f 2>/dev/null | wc -l)"
-        # Save using the same key format as cache-go-dependencies
-      - name: Save GOCACHE to Actions cache
-        if: github.ref == 'refs/heads/master' || contains(github.event.pull_request.labels.*.name, 'ci-seed-cache')
+          echo "GOCACHE before trim: $(du -sh "$GOCACHE_PATH" | cut -f1)"
+          # Remove entries created during the build (newer than the packages list)
+          find "$GOCACHE_PATH" -type f -newer /tmp/go-build-packages.txt -delete 2>/dev/null || true
+          echo "GOCACHE after trim: $(du -sh "$GOCACHE_PATH" | cut -f1)"
+
+      - name: "Save: GOCACHE"
+        if: |
+          (matrix.cache-strategy == 'full-gocache' || matrix.cache-strategy == 'trimmed-gocache') &&
+          (github.ref == 'refs/heads/master' || contains(github.event.pull_request.labels.*.name, 'ci-seed-cache'))
         uses: actions/cache/save@v4
         with:
-          path: |
-            ${{ env.GOCACHE_PATH }}
-            ${{ env.GOMODCACHE_PATH }}
-          key: gocache-Linux-x64-go-${{ env.GO_VERSION }}-${{ github.sha }}
+          path: ${{ env.GOCACHE_PATH }}
+          key: exp-${{ matrix.cache-strategy }}-${{ github.sha }}
 
-      - name: Verify build artifacts
+      - name: Summary
         if: always()
         run: |
-          echo "=== Version info (buildvcs test) ==="
-          if [[ -f bin/linux_amd64/roxctl ]]; then
-            bin/linux_amd64/roxctl version 2>/dev/null || echo "(roxctl version failed - expected on cross-compiled binary)"
-            echo ""
-            echo "Build info:"
-            go version -m bin/linux_amd64/roxctl 2>/dev/null | grep -E "vcs\.|mod\s" || true
-          fi
-          echo ""
-          echo "=== Binary sizes ==="
-          ls -lhS bin/linux_amd64/ 2>/dev/null | head -15
-          echo ""
-          echo "=== Docker images ==="
-          docker images --format "table {{.Repository}}\t{{.Tag}}\t{{.Size}}" 2>/dev/null
-          echo ""
-          echo "=== GOCACHE stats ==="
-          echo "GOCACHE size after build: $(du -sh "$(go env GOCACHE)" 2>/dev/null | cut -f1)"
-          echo ""
-          echo "=== Job summary ==="
-          {
-            echo "| Metric | Value |"
-            echo "|--------|-------|"
-            echo "| UI cache | ${{ steps.restore-ui-build.outputs.cache-hit == 'true' && 'HIT' || 'MISS' }} |"
-            echo "| GOCACHE strategy | Always build, GOCACHE provides incremental compilation |"
-            echo "| Commit | ${{ github.sha }} |"
-          } >> "$GITHUB_STEP_SUMMARY"
+          echo "=== [${{ matrix.cache-strategy }}] Complete ==="
+          ls -lhS bin/linux_amd64/ 2>/dev/null | head -5
 
   define-job-matrix:
     if: false  # Disabled until GOCACHE approach is validated
